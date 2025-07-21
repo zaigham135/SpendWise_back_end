@@ -208,22 +208,28 @@ router.get("/category-summary", verifyToken, async (req, res) => {
 
     const query = `
         SELECT
-            section,
-            SUM(value) AS total_expenses
-        FROM infodata
-        WHERE user_id = ?
-        GROUP BY section
-        ORDER BY section ASC;
+            id.section,
+            SUM(id.value) AS total_expenses,
+            c.iconName,      -- Select iconName from categories table
+            c.iconColor,     -- Select iconColor from categories table
+            c.iconLibrary    -- Select iconLibrary from categories table
+        FROM infodata id
+        LEFT JOIN categories c ON id.section = c.label AND id.user_id = c.user_id
+        WHERE id.user_id = ?
+        GROUP BY id.section, c.iconName, c.iconColor, c.iconLibrary -- Include new columns in GROUP BY
+        ORDER BY total_expenses DESC; -- Ordering by total_expenses is often more useful here
     `;
     const queryParams = [userId];
 
     try {
         const [rows] = await pool.promise().query(query, queryParams);
 
-        // Map the results to a cleaner format if needed, though direct use is fine
         const categorySummaries = rows.map((row) => ({
             section: row.section,
-            total_expenses: parseFloat(row.total_expenses) || 0 // Ensure it's a number, default to 0
+            total_expenses: parseFloat(row.total_expenses) || 0,
+            iconName: row.iconName,      // Include iconName in the response
+            iconColor: row.iconColor,    // Include iconColor in the response
+            iconLibrary: row.iconLibrary // Include iconLibrary in the response
         }));
 
         console.log(`Backend: Fetched category summaries for user ${userId}:`, categorySummaries);
