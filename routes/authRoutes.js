@@ -13,66 +13,122 @@ const { SECRET_KEY, REFRESH_KEY, BASE_URL } = require("../config"); // Import ke
 // Multer configuration (copy from index.js)
 const storage = multer.diskStorage({
   destination: function (req, file, cb) {
-    if (!fs.existsSync('uploads')) {
-      fs.mkdirSync('uploads');
+    const uploadDir = path.join(__dirname, '..', 'uploads');
+    // Create directory if it doesn't exist
+    if (!fs.existsSync(uploadDir)) {
+      fs.mkdirSync(uploadDir, { recursive: true });
     }
-    cb(null, 'uploads/');
+    cb(null, uploadDir);
   },
   filename: function (req, file, cb) {
+    // Create a more reliable filename
     const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-    cb(null, 'profile-' + uniqueSuffix + path.extname(file.originalname));
+    const fileExt = path.extname(file.originalname).toLowerCase();
+    cb(null, `profile-${uniqueSuffix}${fileExt}`);
   }
 });
+// Update file filter to be more strict
 const fileFilter = (req, file, cb) => {
-  if (!file.originalname.match(/\.(jpg|jpeg|png|gif)$/)) {
-    return cb(new Error('Only image files are allowed!'), false);
+  // Accept only specific image types
+  const allowedTypes = /jpeg|jpg|png|gif/;
+  const mimeTypeValid = allowedTypes.test(file.mimetype);
+  const extValid = allowedTypes.test(path.extname(file.originalname).toLowerCase());
+
+  if (mimeTypeValid && extValid) {
+    cb(null, true);
+  } else {
+    cb(new Error('Only .jpg, .jpeg, .png and .gif files are allowed!'), false);
   }
-  cb(null, true);
 };
 const upload = multer({
   storage: storage,
   fileFilter: fileFilter,
   limits: { fileSize: 5 * 1024 * 1024 }
-});
+}).single('profile_photo');
 
 // User Signup API
-router.post("/signup", upload.single('profile_photo'), async (req, res) => {
-  try {
-    const { first_name, last_name, email, phone_number, password } = req.body;
-    const profile_photo = req.file ? `${BASE_URL}/uploads/${req.file.filename}` : null;
-
-    if (!first_name || !last_name || !email || !password || !phone_number) {
-      if (req.file) fs.unlinkSync(req.file.path);
-      return res.status(400).json({ error: "Missing required fields" });
+router.post("/signup", (req, res) => {
+  upload(req, res, async function(err) {
+    if (err) {
+      console.error("Upload error:", err);
+      return res.status(400).json({ 
+        error: "File upload failed", 
+        details: err.message 
+      });
     }
+    
+    try {
+      // Log file details for debugging
+      console.log("File details:", req.file);
+      
+      const { first_name, last_name, email, phone_number, password } = req.body;
+      
+      // Construct the file URL properly
+      const profile_photo = req.file 
+        ? `${BASE_URL}/uploads/${req.file.filename}`
+        : null;
 
-    const [phoneResults] = await pool.promise().query(
-      "SELECT phone_number FROM users WHERE phone_number = ?", [phone_number]
-    );
-    if (phoneResults.length > 0) {
-      return res.status(400).json({ error: "Phone number already registered" });
+      // Validate required fields
+      if (!first_name || !last_name || !email || !password || !phone_number) {
+        // Clean up uploaded file if validation fails
+        if (req.file) {
+          fs.unlinkSync(req.file.path);
+        }
+        return res.status(400).json({ error: "Missing required fields" });
+      }
+
+      // Check for duplicate phone number
+      const [phoneResults] = await pool.promise().query(
+        "SELECT phone_number FROM users WHERE phone_number = ?", 
+        [phone_number]
+      );
+      if (phoneResults.length > 0) {
+        if (req.file) fs.unlinkSync(req.file.path);
+        return res.status(400).json({ error: "Phone number already registered" });
+      }
+
+      // Check for duplicate email
+      const [emailResults] = await pool.promise().query(
+        "SELECT email FROM users WHERE email = ?", 
+        [email]
+      );
+      if (emailResults.length > 0) {
+        if (req.file) fs.unlinkSync(req.file.path);
+        return res.status(400).json({ error: "Email already registered" });
+      }
+
+      // Hash password and create user
+      const hashedPassword = await bcrypt.hash(password, 10);
+      const [result] = await pool.promise().query(
+        "INSERT INTO users (first_name, last_name, email, phone_number, password, profile_photo) VALUES (?, ?, ?, ?, ?, ?)",
+        [first_name, last_name, email, phone_number, hashedPassword, profile_photo]
+      );
+
+      // Return success response
+      res.json({ 
+        message: "User registered successfully", 
+        user: { 
+          id: result.insertId, 
+          first_name, 
+          last_name, 
+          email, 
+          phone_number, 
+          profile_photo 
+        } 
+      });
+
+    } catch (dbError) {
+      // Clean up file if database operation fails
+      if (req.file) {
+        fs.unlinkSync(req.file.path);
+      }
+      console.error("Database error (signup):", dbError);
+      return res.status(500).json({ 
+        error: "Database operation failed", 
+        details: "Please try again later" 
+      });
     }
-
-    const [emailResults] = await pool.promise().query(
-      "SELECT email FROM users WHERE email = ?", [email]
-    );
-    if (emailResults.length > 0) {
-      return res.status(400).json({ error: "Email already registered" });
-    }
-
-    const hashedPassword = await bcrypt.hash(password, 10);
-    const [result] = await pool.promise().query(
-      "INSERT INTO users (first_name, last_name, email, phone_number, password, profile_photo) VALUES (?, ?, ?, ?, ?, ?)",
-      [first_name, last_name, email, phone_number, hashedPassword, profile_photo]
-    );
-
-    res.json({ message: "User registered successfully", user: { id: result.insertId, first_name, last_name, email, phone_number, profile_photo } });
-
-  } catch (dbError) {
-    if (req.file) fs.unlinkSync(req.file.path);
-    console.error("Database error (signup):", dbError);
-    return res.status(500).json({ error: "Database operation failed", details: "Please try again later" });
-  }
+  });
 });
 
 // User Login API
